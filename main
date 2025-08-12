@@ -1,0 +1,188 @@
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+
+def parse_profile(df, profile_index, x_offset=0, z_offset=2):
+    x_row = profile_index * 3 + x_offset
+    z_row = profile_index * 3 + z_offset
+    
+    if df.shape[0] <= z_row:
+        raise ValueError(f"В файле недостаточно строк для профиля {profile_index + 1}")
+    
+    x_values = df.iloc[x_row, :].dropna().values
+    z_values = df.iloc[z_row, :].dropna().values
+    
+    def is_valid_float(value):
+        try:
+            float(value)
+            return True
+        except (ValueError, TypeError):
+            return False
+    
+    x_values = [x for x in x_values if is_valid_float(x) and str(x).strip() != '']
+    z_values = [z for z in z_values if is_valid_float(z) and str(z).strip() != '']
+    
+    if len(x_values) != len(z_values):
+        raise ValueError(f"Длины массивов X и Z не совпадают для профиля {profile_index + 1}")
+    
+    try:
+        x_values = np.array(x_values, dtype=float)
+        z_values = np.array(z_values, dtype=float)
+    except Exception as e:
+        print(f"Ошибка преобразования в float для профиля {profile_index + 1}: {e}")
+        raise
+    
+    non_zero_mask = z_values != 0
+    x_values = x_values[non_zero_mask]
+    z_values = z_values[non_zero_mask]
+    
+    if len(x_values) == 0:
+        raise ValueError(f"После исключения нулевых Z данные отсутствуют для профиля {profile_index + 1}")
+    
+    return x_values, z_values
+
+def average_profiles(file_path, num_profiles=5, num_points=1000):
+    df = pd.read_csv(file_path, header=None)
+    
+    all_x = []
+    all_z = []
+    
+    for i in range(num_profiles):
+        try:
+            x, z = parse_profile(df, i)
+            all_x.append(x)
+            all_z.append(z)
+        except Exception as e:
+            print(f"Ошибка при парсинге профиля {i + 1}: {e}")
+            continue
+    
+    if len(all_x) == 0:
+        raise ValueError("Нет доступных профилей для усреднения")
+    
+    x_min = max([x.min() for x in all_x])
+    x_max = min([x.max() for x in all_x])
+    
+    if x_min >= x_max:
+        raise ValueError("Диапазоны X не пересекаются, интерполяция невозможна")
+    
+    avg_x = np.linspace(x_min, x_max, num_points)
+    
+    interpolated_z = []
+    for x, z in zip(all_x, all_z):
+        z_interp = np.interp(avg_x, x, z)
+        interpolated_z.append(z_interp)
+    
+    avg_z = np.mean(interpolated_z, axis=0)
+    
+    return avg_x, avg_z
+
+def extract_blade_section(x_values, z_values, start_idx, end_idx):
+    """Извлекает секцию лопатки по заданным индексам"""
+    return x_values[start_idx:end_idx], z_values[start_idx:end_idx]
+
+def find_deviations(blade1_x, blade1_z, blade2_x, blade2_z, threshold):
+    """
+    Находит точки с отклонением больше threshold путем попарного сравнения
+    Возвращает массивы X, Z точек с отклонениями и сами отклонения
+    """
+    # Определяем минимальную длину для сравнения
+    min_length = min(len(blade1_x), len(blade2_x))
+    
+    # Обрезаем массивы до одинаковой длины
+    blade1_x = blade1_x[:min_length]
+    blade1_z = blade1_z[:min_length]
+    blade2_x = blade2_x[:min_length]
+    blade2_z = blade2_z[:min_length]
+    
+    # Вычисляем разницу по Z для соответствующих точек
+    deviations = np.abs(blade1_z - blade2_z)
+    
+    # Находим точки с отклонением больше порога
+    mask = deviations > threshold
+    dev_x = blade1_x[mask]
+    dev_z = blade1_z[mask]
+    dev_values = deviations[mask]
+    
+    return dev_x, dev_z, dev_values
+
+# Основная часть
+file_path = '/kaggle/input/lopatki2/3_4_brak_u_mer_sechenie_verh_-8.csv'
+
+try:
+    avg_x, avg_z = average_profiles(file_path, num_profiles=5, num_points=1000)
+except Exception as e:
+    print(f"Ошибка при усреднении профилей: {e}")
+    raise
+
+# Ручное задание границ лопаток (индексы начала и конца), из графика
+blade1_start = 280
+blade1_end = 500  
+blade2_start = 570
+blade2_end = 790 
+
+blade1_x, blade1_z = extract_blade_section(avg_x, avg_z, blade1_start, blade1_end)
+blade2_x, blade2_z = extract_blade_section(avg_x, avg_z, blade2_start, blade2_end)
+
+# Находим точки с отклонением
+threshold=0.2
+dev_x, dev_z, dev_values = find_deviations(blade1_x, blade1_z, blade2_x, blade2_z, threshold)
+
+# Создание графика
+fig = go.Figure()
+
+# Отрисовка эталонной лопатки
+fig.add_trace(go.Scatter(
+    x=blade2_x,
+    y=blade2_z,
+    mode='lines',
+    name='Эталон',
+    line=dict(color='green', width=2),
+    hovertemplate='X: %{x:.2f}<br>Z: %{y:.2f}'
+))
+
+# Отрисовка бракованной лопатки (основная линия)
+fig.add_trace(go.Scatter(
+    x=blade1_x,
+    y=blade1_z,
+    mode='lines',
+    name='Брак (основа)',
+    line=dict(color='blue', width=1),
+    hovertemplate='X: %{x:.2f}<br>Z: %{y:.2f}'
+))
+
+# Отрисовка точек с отклонением
+if len(dev_x) > 0:
+    fig.add_trace(go.Scatter(
+        x=dev_x,
+        y=dev_z,
+        mode='markers',
+        name=f'Отклонения > {threshold:.2f} мм (max: {np.max(dev_values):.3f} мм)',
+        marker=dict(
+            color='red',
+            size=8,
+            line=dict(width=1, color='DarkSlateGrey')
+        ),
+        hovertemplate='X: %{x:.2f}<br>Z: %{y:.2f}<br>Отклонение: %{text:.3f} мм',
+        text=dev_values
+    ))
+else:
+    print("Нет точек с отклонением более {threshold:.2f} мм")
+
+# Оформление графика
+fig.update_layout(
+    title=f'Анализ отклонений лопатки (порог: {threshold:.2f} мм)',
+    xaxis_title='X (мм)',
+    yaxis_title='Z (мм)',
+    hovermode='closest',
+    showlegend=True,
+    template='plotly_white',
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1
+    )
+)
+
+fig.show()
